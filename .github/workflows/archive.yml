@@ -35,7 +35,12 @@ jobs:
       
       - name: Create cookies file from secret
         run: |
-          echo '${{ secrets.TWITTER_COOKIES }}' > simple_twitter_cookies.json
+          cat > simple_twitter_cookies.json << 'EOF'
+          ${{ secrets.TWITTER_COOKIES }}
+          EOF
+          echo "[DEBUG] Cookie file created"
+          echo "[DEBUG] File size: $(wc -c < simple_twitter_cookies.json) bytes"
+          echo "[DEBUG] First 100 chars: $(head -c 100 simple_twitter_cookies.json)"
       
       - name: Download previous media (if exists)
         continue-on-error: true
