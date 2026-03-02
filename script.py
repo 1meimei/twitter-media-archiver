@@ -146,36 +146,55 @@ async def load_and_validate_cookies(client: Client) -> bool:
     Returns:
         True if cookies loaded and validated successfully
     """
-    # Auto-convert if raw export exists
-    if not os.path.exists(COOKIES_FILE) and os.path.exists(RAW_COOKIES_FILE):
-        print("[*] Converting raw cookies to simple format...")
-        if not await convert_cookies(RAW_COOKIES_FILE, COOKIES_FILE):
-            return False
-    
     # Load cookies
     if not os.path.exists(COOKIES_FILE):
         print(f"[!] Cookie file not found: {COOKIES_FILE}")
-        print("[!] Please export cookies from your browser and save as 'simple_twitter_cookies.json'")
         return False
     
     try:
-        # Load and validate
+        # Load the cookie file
         with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
-            cookies = json.load(f)
+            raw_data = json.load(f)
+        
+        # Handle both list and dict formats
+        if isinstance(raw_data, list):
+            # Convert list format to dict
+            cookies = {cookie['name']: cookie['value'] for cookie in raw_data}
+            print(f"[*] Converted {len(raw_data)} cookies from list format")
+        elif isinstance(raw_data, dict):
+            # Already in simple format
+            cookies = raw_data
+        else:
+            print(f"[!] Unknown cookie format")
+            return False
         
         # Check for required cookies
         missing = [key for key in REQUIRED_COOKIES if key not in cookies]
         if missing:
             print(f"[!] Missing required cookies: {', '.join(missing)}")
-            print("[!] Please re-export cookies from an authenticated browser session")
+            print(f"[!] Available cookies: {', '.join(cookies.keys())}")
             return False
         
+        # Create simple format file for twikit
+        simple_cookies = {k: v for k, v in cookies.items()}
+        with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(simple_cookies, f)
+        
+        # Load into client
         client.load_cookies(path=COOKIES_FILE)
         print(f"[✓] Loaded {len(cookies)} cookies into session")
         return True
     
+    except json.JSONDecodeError as e:
+        print(f"[!] Invalid JSON in cookie file: {e}")
+        return False
+    except KeyError as e:
+        print(f"[!] Cookie format error - missing 'name' or 'value' field: {e}")
+        return False
     except Exception as e:
         print(f"[!] Failed to load cookies: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
