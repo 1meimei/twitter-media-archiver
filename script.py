@@ -1,8 +1,3 @@
-"""
-Twitter/X Media Archiver - Enhanced Production Version
-Robust asynchronous downloader with HTTP/2 support, retry logic, and comprehensive error handling.
-"""
-
 import asyncio
 import os
 import json
@@ -18,6 +13,49 @@ except ImportError as e:
     print(f"[!] Missing required dependency: {e}")
     print("[!] Install with: pip install twikit httpx[http2]")
     sys.exit(1)
+
+# MONKEY PATCH: Remove this block when twikit is updated to fix ON_DEMAND_FILE_REGEX
+import re
+_tx_mod = __import__('twikit.x_client_transaction.transaction', fromlist=['ClientTransaction'])
+_tx_mod.ON_DEMAND_FILE_REGEX = re.compile(
+    r""",(\d+):["']ondemand\.s["']""", flags=(re.VERBOSE | re.MULTILINE))
+_tx_mod.ON_DEMAND_HASH_PATTERN = r',{}:"([0-9a-f]+)"'
+async def _patched_get_indices(self, home_page_response, session, headers):
+    key_byte_indices = []
+    response = self.validate_response(home_page_response) or self.home_page_response
+    on_demand_file_index = _tx_mod.ON_DEMAND_FILE_REGEX.search(str(response)).group(1)
+    regex = re.compile(_tx_mod.ON_DEMAND_HASH_PATTERN.format(on_demand_file_index))
+    filename = regex.search(str(response)).group(1)
+    on_demand_file_url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{filename}a.js"
+    on_demand_file_response = await session.request(method="GET", url=on_demand_file_url, headers=headers)
+    key_byte_indices_match = _tx_mod.INDICES_REGEX.finditer(str(on_demand_file_response.text))
+    for item in key_byte_indices_match:
+        key_byte_indices.append(item.group(2))
+    if not key_byte_indices:
+        raise Exception("Couldn't get KEY_BYTE indices")
+    key_byte_indices = list(map(int, key_byte_indices))
+    return key_byte_indices[0], key_byte_indices[1:]
+_tx_mod.ClientTransaction.get_indices = _patched_get_indices
+# END MONKEY PATCH
+
+# MONKEY PATCH 2: Fix KeyError in User.__init__ for missing optional fields
+from twikit import user as _user_mod
+_original_user_init = _user_mod.User.__init__
+
+def _patched_user_init(self, client, data):
+    if 'legacy' in data:
+        legacy = data['legacy']
+        # Ensure description urls exists
+        if 'entities' in legacy and 'description' in legacy['entities']:
+            legacy['entities']['description'].setdefault('urls', [])
+        # Ensure other commonly missing fields have defaults
+        legacy.setdefault('withheld_in_countries', [])
+        legacy.setdefault('pinned_tweet_ids_str', [])
+        legacy.setdefault('profile_interstitial_type', '')
+    _original_user_init(self, client, data)
+
+_user_mod.User.__init__ = _patched_user_init
+# END MONKEY PATCH 2
 
 # Check for ffmpeg
 FFMPEG_AVAILABLE = False
@@ -146,55 +184,36 @@ async def load_and_validate_cookies(client: Client) -> bool:
     Returns:
         True if cookies loaded and validated successfully
     """
+    # Auto-convert if raw export exists
+    if not os.path.exists(COOKIES_FILE) and os.path.exists(RAW_COOKIES_FILE):
+        print("[*] Converting raw cookies to simple format...")
+        if not await convert_cookies(RAW_COOKIES_FILE, COOKIES_FILE):
+            return False
+    
     # Load cookies
     if not os.path.exists(COOKIES_FILE):
         print(f"[!] Cookie file not found: {COOKIES_FILE}")
+        print("[!] Please export cookies from your browser and save as 'simple_twitter_cookies.json'")
         return False
     
     try:
-        # Load the cookie file
+        # Load and validate
         with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
-        
-        # Handle both list and dict formats
-        if isinstance(raw_data, list):
-            # Convert list format to dict
-            cookies = {cookie['name']: cookie['value'] for cookie in raw_data}
-            print(f"[*] Converted {len(raw_data)} cookies from list format")
-        elif isinstance(raw_data, dict):
-            # Already in simple format
-            cookies = raw_data
-        else:
-            print(f"[!] Unknown cookie format")
-            return False
+            cookies = json.load(f)
         
         # Check for required cookies
         missing = [key for key in REQUIRED_COOKIES if key not in cookies]
         if missing:
             print(f"[!] Missing required cookies: {', '.join(missing)}")
-            print(f"[!] Available cookies: {', '.join(cookies.keys())}")
+            print("[!] Please re-export cookies from an authenticated browser session")
             return False
         
-        # Create simple format file for twikit
-        simple_cookies = {k: v for k, v in cookies.items()}
-        with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(simple_cookies, f)
-        
-        # Load into client
         client.load_cookies(path=COOKIES_FILE)
         print(f"[✓] Loaded {len(cookies)} cookies into session")
         return True
     
-    except json.JSONDecodeError as e:
-        print(f"[!] Invalid JSON in cookie file: {e}")
-        return False
-    except KeyError as e:
-        print(f"[!] Cookie format error - missing 'name' or 'value' field: {e}")
-        return False
     except Exception as e:
         print(f"[!] Failed to load cookies: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 
@@ -584,7 +603,7 @@ async def main():
     print("[*] Loading authentication cookies...")
     if not await load_and_validate_cookies(client):
         print("\n[!] Authentication failed. Exiting.")
-        return
+        sys.exit(1)
     
     try:
         # Resolve user
@@ -616,8 +635,7 @@ async def main():
         print(f"\n[!] Critical error: {e}")
         import traceback
         traceback.print_exc()
-        return
-
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:
